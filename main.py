@@ -2,7 +2,7 @@ import flet as ft
 from ui.views import MainView
 
 def main(page: ft.Page):
-    page.title = "CineSearch AI - Desktop"
+    page.title = "Vision Archive"
     page.theme_mode = ft.ThemeMode.DARK
     page.padding = 20
     page.window_width = 1100
