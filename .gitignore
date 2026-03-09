@@ -1,1 +1,8 @@
 .venv
+cinesearch_db/
+
+core/__init__.py
+core/__pycache__/
+
+ui/__init__.py
+ui/__pycache__/

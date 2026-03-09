@@ -1,126 +1,219 @@
 import flet as ft
-import os
-import asyncio
-from core.processor import VisionEngine
-from core.database import VectorDB
+import threading
+
+from core.processor import VisionProcessor
+from core.database import VectorDatabase
 from ui.components import ResultCard
 
+
 class MainView:
+
     def __init__(self, page: ft.Page):
         self.page = page
-        self.engine = VisionEngine()
-        self.db = VectorDB()
-        
-        # UI State Elements
-        self.search_input = ft.TextField(
-            label="Search for scenes (e.g., 'a person drinking coffee')", 
+        self.page.padding = 20
+
+        self._processor = None
+        self._database = None
+
+        # FILE PICKER — must append to overlay AND call page.update() immediately
+        self.file_picker = ft.FilePicker()
+        self.file_picker.on_result = self.on_file_selected
+        self.page.overlay.append(self.file_picker)
+        self.page.update()  # <-- critical: registers the FilePicker with the renderer
+
+        # UI ELEMENTS
+        self.search_box = ft.TextField(
+            hint_text="Describe what you're looking for…",
             expand=True,
-            on_submit=self.handle_search
+            border_color=ft.Colors.CYAN_700,
+            focused_border_color=ft.Colors.CYAN_300,
+            text_style=ft.TextStyle(color=ft.Colors.WHITE),
+            on_submit=self.search,
         )
-        self.results_grid = ft.GridView(expand=1, runs_count=5, max_extent=300, spacing=15)
-        self.status_label = ft.Text("System Ready", color=ft.colors.GREEN_400)
-        self.loader = ft.ProgressRing(visible=False)
+
+        self.status = ft.Text(
+            "Ready — upload a video to begin.",
+            color=ft.Colors.BLUE_GREY_300,
+            size=13
+        )
+
+        self.results = ft.Column(
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+            spacing=0
+        )
+
+        self.upload_button = ft.ElevatedButton(
+            "Upload Video",
+            icon=ft.Icons.VIDEO_FILE,
+            on_click=self.open_file_picker,
+            bgcolor=ft.Colors.CYAN_700,
+            color=ft.Colors.WHITE
+        )
+
+        self.search_button = ft.ElevatedButton(
+            "Search",
+            icon=ft.Icons.SEARCH,
+            on_click=self.search,
+            bgcolor=ft.Colors.INDIGO_600,
+            color=ft.Colors.WHITE
+        )
+
+        self.progress = ft.ProgressBar(
+            visible=False,
+            color=ft.Colors.CYAN_400,
+            bgcolor=ft.Colors.BLUE_GREY_700
+        )
+
+    # ------------------------------------------------------------------ #
+    #  Lazy-load heavy models so the window opens instantly               #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def processor(self):
+        if self._processor is None:
+            self._set_status("Loading CLIP model…")
+            self._processor = VisionProcessor()
+        return self._processor
+
+    @property
+    def database(self):
+        if self._database is None:
+            self._database = VectorDatabase()
+        return self._database
+
+    # ------------------------------------------------------------------ #
+    #  Layout                                                             #
+    # ------------------------------------------------------------------ #
 
     def build(self):
-        """Returns the main UI layout."""
-        return ft.Container(
-            padding=30,
-            content=ft.Column([
-                ft.Row([
-                    ft.Text("CineSearch", size=40, weight="bold", color=ft.colors.CYAN_400),
-                    ft.Text("Desktop AI", size=15, italic=True)
-                ], alignment=ft.MainAxisAlignment.CENTER),
-                ft.Row([
-                    self.search_input, 
-                    ft.IconButton(ft.icons.SEARCH, on_click=self.handle_search)
-                ]),
-                ft.Row([
-                    ft.ElevatedButton(
-                        "Index New Video", 
-                        icon=ft.icons.UPLOAD_FILE, 
-                        on_click=self.pick_file_dialog
-                    ),
-                    self.loader,
-                    self.status_label
-                ]),
-                ft.Divider(height=20, color=ft.colors.TRANSPARENT),
-                self.results_grid
-            ], expand=True)
+        header = ft.Text(
+            "Vision Archive",
+            size=28,
+            weight=ft.FontWeight.BOLD,
+            color=ft.Colors.CYAN_300
         )
 
-    async def pick_file_dialog(self, e):
-        """Opens the system file picker asynchronously (Flet 0.80+ standard)."""
-        # Await the new async FilePicker directly
-        files = await ft.FilePicker().pick_files(allow_multiple=False, allowed_extensions=["mp4", "mkv", "avi"])
-        
-        if files:
-            video_path = files[0].path
-            video_name = files[0].name
-            
-            # Run the heavy indexing function in a background thread to prevent UI lockup
-            asyncio.create_task(asyncio.to_thread(self.index_video, video_path, video_name))
+        toolbar = ft.Row(
+            controls=[
+                self.upload_button,
+                self.search_box,
+                self.search_button,
+            ],
+            spacing=10
+        )
 
-    def index_video(self, path, name):
-        """Extracts frames, gets embeddings, and saves to database."""
-        self.loader.visible = True
-        self.status_label.value = f"Processing {name}..."
-        self.status_label.color = ft.colors.YELLOW_400
-        self.page.update()
-        
-        try:
-            # 1. Extract frames
-            frames, timestamps = self.engine.get_video_frames(path)
-            # 2. Convert frames to vector embeddings
-            vectors = self.engine.encode_image_batch(frames)
-            # 3. Save to Qdrant DB
-            self.db.add_frames(name, path, vectors, timestamps)
-            
-            self.status_label.value = "Indexing Complete!"
-            self.status_label.color = ft.colors.GREEN_400
-        except Exception as ex:
-            self.status_label.value = f"Error: {ex}"
-            self.status_label.color = ft.colors.RED_400
-            
-        self.loader.visible = False
+        return ft.Column(
+            controls=[
+                header,
+                ft.Divider(color=ft.Colors.BLUE_GREY_700),
+                toolbar,
+                self.progress,
+                self.status,
+                ft.Divider(color=ft.Colors.BLUE_GREY_800),
+                ft.Container(content=self.results, expand=True),
+            ],
+            expand=True,
+            spacing=10
+        )
+
+    # ------------------------------------------------------------------ #
+    #  Helpers                                                            #
+    # ------------------------------------------------------------------ #
+
+    def _set_status(self, msg: str):
+        self.status.value = msg
         self.page.update()
 
-    async def handle_search(self, e):
-        """Handles the text search query."""
-        if not self.search_input.value: 
+    def _set_busy(self, busy: bool):
+        self.progress.visible = busy
+        self.upload_button.disabled = busy
+        self.search_button.disabled = busy
+        self.page.update()
+
+    # ------------------------------------------------------------------ #
+    #  File picking                                                       #
+    # ------------------------------------------------------------------ #
+
+    def open_file_picker(self, e):
+        self.file_picker.pick_files(
+            allow_multiple=False,
+            allowed_extensions=["mp4", "avi", "mov", "mkv", "webm"]
+        )
+
+    def on_file_selected(self, e):
+        if not e.files:
             return
-            
-        self.status_label.value = "Searching vectors..."
-        self.status_label.color = ft.colors.YELLOW_400
-        self.page.update()
-        
-        try:
-            # Run the AI encoding in a background thread
-            query_vec = await asyncio.to_thread(self.engine.encode_text, self.search_input.value)
-            
-            # Search DB
-            results = await asyncio.to_thread(self.db.search, query_vec)
-            
-            # Update UI
-            self.results_grid.controls.clear()
-            for res in results:
-                p = res.payload
-                self.results_grid.controls.append(
-                    ResultCard(p['video_name'], p['timestamp'], p['path'], self.play_video)
-                )
-                
-            self.status_label.value = f"Search finished: {len(results)} results"
-            self.status_label.color = ft.colors.GREEN_400
-        except Exception as ex:
-            self.status_label.value = f"Search Error: {ex}"
-            self.status_label.color = ft.colors.RED_400
-            
-        self.page.update()
+        video_path = e.files[0].path
+        threading.Thread(
+            target=self.index_video,
+            args=(video_path,),
+            daemon=True
+        ).start()
 
-    def play_video(self, path):
-        """Opens the video using the default Windows player."""
+    # ------------------------------------------------------------------ #
+    #  Indexing                                                           #
+    # ------------------------------------------------------------------ #
+
+    def index_video(self, path: str):
+        self._set_busy(True)
         try:
-            os.startfile(path)
-        except Exception as ex:
-            self.status_label.value = f"Error playing video: {ex}"
-            self.status_label.color = ft.colors.RED_400
-            self.page.update()
+            self._set_status("Extracting frames…")
+            frames, timestamps = self.processor.extract_frames(path)
+
+            if not frames:
+                self._set_status("⚠️  No frames extracted — is the file a valid video?")
+                return
+
+            self._set_status(f"Encoding {len(frames)} frames…")
+            embeddings = self.processor.encode_images(frames)
+
+            self.database.add_embeddings(embeddings, path, timestamps)
+            self._set_status(f"✅  Indexed {len(frames)} frames from \"{path}\"")
+
+        except Exception as exc:
+            self._set_status(f"❌  Error: {exc}")
+        finally:
+            self._set_busy(False)
+
+    # ------------------------------------------------------------------ #
+    #  Searching                                                          #
+    # ------------------------------------------------------------------ #
+
+    def search(self, e):
+        query = self.search_box.value.strip()
+        if not query:
+            return
+        threading.Thread(
+            target=self.run_search,
+            args=(query,),
+            daemon=True
+        ).start()
+
+    def run_search(self, query: str):
+        self._set_busy(True)
+        try:
+            self._set_status("Searching…")
+            vector = self.processor.encode_text(query)
+            results = self.database.search(vector)
+
+            self.results.controls.clear()
+
+            if not results:
+                self.results.controls.append(
+                    ft.Text("No results found.", color=ft.Colors.BLUE_GREY_400)
+                )
+            else:
+                for r in results:
+                    video = r.payload["video"]
+                    timestamp = r.payload["timestamp"]
+                    score = getattr(r, "score", None)
+                    card = ResultCard(video, timestamp, score).build()
+                    self.results.controls.append(card)
+
+            self._set_status(f"✅  {len(results)} result(s) for \"{query}\"")
+
+        except Exception as exc:
+            self._set_status(f"❌  Search error: {exc}")
+        finally:
+            self._set_busy(False)
